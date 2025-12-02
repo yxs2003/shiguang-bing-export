@@ -33,10 +33,18 @@
 | 网站地图面板   | 总地图+分类/文章/页面/标签独立地图生成，支持快速访问与验证               |
 | 配置面板       | Bing API 密钥配置、IndexNow 密钥配置、功能开关设置                       |
 
+
+#### 提交日志面板
 [![插件日志](https://s41.ax1x.com/2025/12/02/pZZ3A5n.webp)](https://imgchr.com/i/pZZ3A5n)
-[![网站地图](https://s41.ax1x.com/2025/12/02/pZZ3FEj.webp)](https://imgchr.com/i/pZZ3FEj)
+
+#### 链接提交面板
 [![链接提交](https://s41.ax1x.com/2025/12/02/pZZ3PbQ.webp)](https://imgchr.com/i/pZZ3PbQ)
-[!密钥管理](https://s41.ax1x.com/2025/12/02/pZZ3kUs.webp)](https://imgchr.com/i/pZZ3kUs)
+
+#### 网站地图面板
+[![网站地图](https://s41.ax1x.com/2025/12/02/pZZ3FEj.webp)](https://imgchr.com/i/pZZ3FEj)
+
+#### 配置面板
+[![密钥管理](https://s41.ax1x.com/2025/12/02/pZZ3kUs.webp)](https://imgchr.com/i/pZZ3kUs)
 
 ## 更新日志
 ### v5.9 (2025-11-29)
