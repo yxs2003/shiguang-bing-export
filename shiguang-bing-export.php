@@ -2,8 +2,8 @@
 /*
 Plugin Name: Shiguang Bing URL Export
 Plugin URI: https://www.shiguang.ink/
-Description: 企业级 Bing 站长助手 v5.9。修复 Sitemap URL 自动跳转斜杠问题，优化数据库兼容性。
-Version: 5.9
+Description: 企业级 Bing 站长助手 v6.1。修复 IndexNow 验证问题，增加卸载清理，优化安全性，恢复Sitemap详细索引。
+Version: 6.1
 Author: Shiguang
 License: GPLv2
 */
@@ -18,29 +18,31 @@ class SGBing_Pro {
     private $quota_endpoint = 'https://ssl.bing.com/webmaster/api.svc/json/GetUrlSubmissionQuota';
     private $indexnow_endpoint = 'https://api.indexnow.org/indexnow';
     private $log_table;
-    private $db_version = '1.4'; // 版本号升级，触发数据库检查和重写规则刷新
+    private $db_version = '1.6'; // 版本号升级
 
     public function __construct() {
         global $wpdb;
         $this->log_table = $wpdb->prefix . 'sgbing_logs';
 
+        // 激活与卸载
         register_activation_hook( __FILE__, array( $this, 'install_db' ) );
+        register_uninstall_hook( __FILE__, array( 'SGBing_Pro', 'on_uninstall' ) );
+        
+        // 初始化检查
         add_action( 'plugins_loaded', array( $this, 'check_db_update' ) );
         
+        // 后台菜单与资源
         add_action( 'admin_menu', array( $this, 'add_menu' ) );
         add_action( 'admin_enqueue_scripts', array( $this, 'load_assets' ) );
+        
+        // 自动提交钩子
         add_action( 'transition_post_status', array( $this, 'auto_submit_post' ), 10, 3 );
 
-        // Sitemap 相关钩子
+        // Sitemap 相关
         add_action( 'init', array( $this, 'sitemap_init' ) );
         add_action( 'template_redirect', array( $this, 'sitemap_render' ) );
         add_filter( 'query_vars', array( $this, 'register_query_vars' ) );
-        // 【关键修复】禁止对 Sitemap 进行规范重定向（去斜杠）
         add_filter( 'redirect_canonical', array( $this, 'stop_canonical_redirect' ), 10, 2 );
-        
-        // IndexNow 相关钩子
-        add_action( 'init', array( $this, 'indexnow_route' ) );
-        add_action( 'template_redirect', array( $this, 'indexnow_render_key' ) );
 
         // 禁用 WP 自带 Sitemap
         if ( get_option( 'sgbing_sm_enable', 1 ) ) {
@@ -56,18 +58,40 @@ class SGBing_Pro {
     }
 
     /**
-     * 【修复】阻止 WordPress 给 XML 文件末尾强行加斜杠
+     * 静态卸载方法：清理数据库表和残留文件
      */
-    public function stop_canonical_redirect( $redirect_url, $requested_url ) {
-        if ( get_query_var( 'sg_sitemap' ) ) {
-            return false;
+    public static function on_uninstall() {
+        global $wpdb;
+        // 1. 删除数据表
+        $table_name = $wpdb->prefix . 'sgbing_logs';
+        $wpdb->query( "DROP TABLE IF EXISTS $table_name" );
+
+        // 2. 删除设置项
+        delete_option( 'sgbing_db_version' );
+        delete_option( 'sgbing_api_key' );
+        delete_option( 'sgbing_sm_enable' );
+
+        // 3. 删除 IndexNow 文件
+        $key = get_option( 'sgbing_indexnow_key' );
+        if ( $key ) {
+            $file = ABSPATH . $key . '.txt';
+            if ( file_exists( $file ) ) {
+                @unlink( $file );
+            }
+            delete_option( 'sgbing_indexnow_key' );
         }
-        return $redirect_url;
     }
+
+    // --- 1. 基础设置与文件处理 ---
 
     public function check_db_update() {
         if ( get_option( 'sgbing_db_version' ) != $this->db_version ) {
             $this->install_db();
+        }
+        // 双重保险：每次加载插件检查文件是否存在，不存在则补全
+        $key = get_option( 'sgbing_indexnow_key' );
+        if ( $key && ! file_exists( ABSPATH . $key . '.txt' ) ) {
+            $this->update_indexnow_file( $key );
         }
     }
 
@@ -75,7 +99,6 @@ class SGBing_Pro {
         global $wpdb;
         $charset_collate = $wpdb->get_charset_collate();
         
-        // 优化：time 字段默认值改为 current_timestamp 或允许 null，防止某些 MySQL 严格模式报错
         $sql = "CREATE TABLE $this->log_table (
             id mediumint(9) NOT NULL AUTO_INCREMENT,
             time datetime DEFAULT CURRENT_TIMESTAMP,
@@ -90,17 +113,40 @@ class SGBing_Pro {
         dbDelta( $sql );
         update_option( 'sgbing_db_version', $this->db_version );
         
-        // 重新初始化规则并刷新
         $this->sitemap_init();
-        $this->indexnow_route();
-        if(!get_option('sgbing_indexnow_key')) update_option('sgbing_indexnow_key', wp_generate_password(32, false));
+        
+        // 初始化 IndexNow Key 并写入物理文件
+        $key = get_option('sgbing_indexnow_key');
+        if ( ! $key ) {
+            $key = wp_generate_password( 32, false );
+            update_option( 'sgbing_indexnow_key', $key );
+        }
+        $this->update_indexnow_file( $key );
+
         flush_rewrite_rules();
+    }
+
+    /**
+     * 写入 IndexNow 验证文件到根目录
+     */
+    private function update_indexnow_file( $key ) {
+        $file_path = ABSPATH . $key . '.txt';
+        // 尝试写入
+        $result = @file_put_contents( $file_path, $key );
+        return $result !== false;
+    }
+
+    public function stop_canonical_redirect( $redirect_url, $requested_url ) {
+        if ( get_query_var( 'sg_sitemap' ) ) {
+            return false;
+        }
+        return $redirect_url;
     }
 
     public function load_assets( $hook ) {
         if ( strpos( $hook, 'sgbing-export' ) === false ) return;
-        wp_enqueue_style( 'sgbing-css', plugin_dir_url( __FILE__ ) . 'admin.css', array(), '5.9' );
-        wp_enqueue_script( 'sgbing-js', plugin_dir_url( __FILE__ ) . 'admin.js', array( 'jquery' ), '5.9', true );
+        wp_enqueue_style( 'sgbing-css', plugin_dir_url( __FILE__ ) . 'admin.css', array(), '6.1' );
+        wp_enqueue_script( 'sgbing-js', plugin_dir_url( __FILE__ ) . 'admin.js', array( 'jquery' ), '6.1', true );
         wp_localize_script( 'sgbing-js', 'sgbingVars', array(
             'ajaxUrl' => admin_url( 'admin-ajax.php' ),
             'nonce'   => wp_create_nonce( 'sgbing_nonce' )
@@ -111,32 +157,33 @@ class SGBing_Pro {
         add_menu_page( 'Bing Pro', 'Bing Pro', 'manage_options', 'sgbing-export', array( $this, 'render_ui' ), 'dashicons-chart-line', 99 );
     }
 
-    public function indexnow_route() {
-        add_rewrite_rule( '^([a-zA-Z0-9-]{32,})\.txt$', 'index.php?sg_indexnow_key=$matches[1]', 'top' );
-    }
-
-    public function indexnow_render_key() {
-        $req_key = get_query_var( 'sg_indexnow_key' );
-        $my_key  = get_option( 'sgbing_indexnow_key' );
-        if ( !empty($req_key) && $req_key === $my_key ) {
-            status_header( 200 );
-            header( 'Content-Type: text/plain; charset=utf-8' );
-            echo $my_key;
-            exit;
-        }
-    }
+    // --- 2. AJAX IndexNow 生成 ---
 
     public function ajax_gen_indexnow_key() {
         check_ajax_referer( 'sgbing_nonce', 'nonce' );
         if(!current_user_can('manage_options')) wp_send_json_error('无权限');
+
+        // 1. 删除旧文件
+        $old_key = get_option('sgbing_indexnow_key');
+        if ( $old_key && file_exists( ABSPATH . $old_key . '.txt' ) ) {
+            @unlink( ABSPATH . $old_key . '.txt' );
+        }
+
+        // 2. 生成并保存新 Key
         $new_key = wp_generate_password(32, false);
         update_option('sgbing_indexnow_key', $new_key);
-        flush_rewrite_rules(); 
-        wp_send_json_success($new_key);
+        
+        // 3. 写入新文件
+        if ( $this->update_indexnow_file( $new_key ) ) {
+            wp_send_json_success( $new_key );
+        } else {
+            wp_send_json_error( 'Key 已生成，但根目录写入失败（权限不足）。请手动创建文件：' . $new_key . '.txt' );
+        }
     }
 
+    // --- 3. UI 渲染 ---
+
     public function render_ui() {
-        // UI 渲染逻辑保持不变，功能完好
         $api_key = get_option( 'sgbing_api_key' );
         $has_key = ! empty( $api_key );
         $indexnow_key = get_option( 'sgbing_indexnow_key' );
@@ -144,6 +191,7 @@ class SGBing_Pro {
         $chunks = array_chunk( $post_ids, 50 );
         $sm_enable = get_option( 'sgbing_sm_enable', 1 );
 
+        // 定义所有 Sitemap URL
         $sm_main  = home_url( '/sitemap.xml' );
         $sm_post  = home_url( '/sitemap-posts.xml' );
         $sm_page  = home_url( '/sitemap-pages.xml' );
@@ -176,7 +224,7 @@ class SGBing_Pro {
                     <span class="dashicons dashicons-menu-alt"></span> 菜单
                 </div>
                 <div class="sg-sidebar" id="sg-sidebar">
-                    <div class="sg-brand">Bing Pro <span class="ver">v5.9</span></div>
+                    <div class="sg-brand">Bing Pro <span class="ver">v6.1</span></div>
                     <nav class="sg-nav">
                         <a href="#dashboard" class="nav-item active" data-tab="dashboard"><span class="dashicons dashicons-dashboard"></span> 概览 & 日志</a>
                         <a href="#bulk" class="nav-item" data-tab="bulk"><span class="dashicons dashicons-upload"></span> 链接提交</a>
@@ -232,7 +280,6 @@ class SGBing_Pro {
                                                 <th style="width:35%">URL</th>
                                                 <th style="width:10%">状态</th>
                                                 <th style="width:20%">消息</th>
-                                                <th style="width:10%">操作</th>
                                             </tr>
                                         </thead>
                                         <tbody id="log-tbody"></tbody>
@@ -256,7 +303,7 @@ class SGBing_Pro {
                                             <label><input type="radio" name="submit_channel" value="api" checked> Bing API (消耗配额)</label>
                                             <label><input type="radio" name="submit_channel" value="indexnow"> IndexNow (无配额限制)</label>
                                         </div>
-                                        <p style="font-size:12px; color:#666; margin-top:5px;">提示：如果在“Bing API”模式下遇到错误，系统会自动尝试用 IndexNow 重新提交。</p>
+                                        <p style="font-size:12px; color:#666; margin-top:5px;">提示：API 模式失败时，系统会自动尝试 IndexNow。</p>
                                     </div>
                                     <textarea id="manual-urls" class="sg-textarea" placeholder="https://... (一行一个)"></textarea>
                                     <button onclick="submitManual()" class="sg-btn primary full" style="margin-top:10px;">立即提交</button>
@@ -284,7 +331,6 @@ class SGBing_Pro {
                                                     </div>
                                                     <div class="batch-actions">
                                                         <button class="sg-btn sm outline btn-copy" data-target="<?php echo $group_id; ?>">复制</button>
-                                                        <button class="sg-btn sm outline btn-toggle" data-target="<?php echo $group_id; ?>">查看</button>
                                                         <button class="sg-btn sm primary btn-submit-batch">提交</button>
                                                     </div>
                                                 </div>
@@ -365,11 +411,12 @@ class SGBing_Pro {
                                     <label>IndexNow Key</label>
                                     <div style="display:flex; gap:10px;">
                                         <input type="text" value="<?php echo esc_attr($indexnow_key); ?>" disabled class="sg-input" style="flex:1;">
-                                        <button onclick="genIndexNow()" class="sg-btn sm outline">重新生成</button>
+                                        <button onclick="genIndexNow()" class="sg-btn sm outline">重新生成 (更新文件)</button>
                                     </div>
                                 </div>
                                 <div class="sg-info-box">
                                     验证文件: <a href="<?php echo home_url('/'.$indexnow_key.'.txt'); ?>" target="_blank"><?php echo home_url('/'.$indexnow_key.'.txt'); ?></a>
+                                    <br><span style="font-size:12px; color:#666;">(点击链接应直接显示 Key，如果报 404 请检查网站目录写权限)</span>
                                 </div>
                             </div>
                             <div class="sg-card">
@@ -380,8 +427,7 @@ class SGBing_Pro {
                             <div class="sg-card">
                                 <h4 style="margin-top:0;">关于插件</h4>
                                 <p style="font-size:13px; color:#666; line-height:1.6;">
-                                    <strong>Bing Webmaster Pro</strong> 是一款专为 WordPress 设计的高性能 SEO 提交工具。<br>
-                                    当前版本: <strong>v5.9</strong><br>
+                                    <strong>Bing Webmaster Pro</strong> v6.1<br>
                                     开发者: Shiguang
                                 </p>
                             </div>
@@ -406,17 +452,14 @@ class SGBing_Pro {
 
         global $wpdb;
         
-        // 分页逻辑
         $per_page = 10;
         $page = isset($_POST['page']) ? intval($_POST['page']) : 1;
         if($page < 1) $page = 1;
         $offset = ($page - 1) * $per_page;
 
-        // 获取总数
         $total_items = $wpdb->get_var("SELECT COUNT(*) FROM $this->log_table");
         $total_pages = ceil($total_items / $per_page);
 
-        // 获取分页数据
         $logs = $wpdb->get_results( $wpdb->prepare("SELECT * FROM $this->log_table ORDER BY time DESC LIMIT %d OFFSET %d", $per_page, $offset) );
         
         if($logs) {
@@ -472,7 +515,16 @@ class SGBing_Pro {
 
     public function ajax_manual_submit() {
         check_ajax_referer( 'sgbing_nonce', 'nonce' );
-        $urls = array_filter(preg_split( '/\r\n|[\r\n]/', $_POST['urls'] ));
+        // 安全过滤：清理 textarea 输入的内容
+        $raw_urls = preg_split( '/\r\n|[\r\n]/', $_POST['urls'] );
+        $urls = array();
+        foreach ( $raw_urls as $u ) {
+            $u = trim($u);
+            if ( ! empty($u) ) {
+                $urls[] = esc_url_raw($u);
+            }
+        }
+        
         if(empty($urls)) wp_send_json_error('URL 为空');
 
         $channel = isset($_POST['channel']) ? $_POST['channel'] : 'api';
@@ -534,7 +586,7 @@ class SGBing_Pro {
         
         $lock_key = 'sg_bing_lock_' . $post->ID;
         if ( get_transient( $lock_key ) ) return;
-        set_transient( $lock_key, 1, 15 ); 
+        set_transient( $lock_key, 1, 30 ); // 增加锁时间防止并发
 
         $url = get_permalink( $post->ID );
         $api_key = get_option( 'sgbing_api_key' );
@@ -551,6 +603,7 @@ class SGBing_Pro {
                 $final_msg = 'Auto Publish (API)';
             } else {
                 $err_code = $res['code']; 
+                // 402=QuotaExceeded, 429=TooManyRequests, 400=BadReq, 0=ConnectionFail
                 if ($err_code == 402 || $err_code == 429 || $err_code == 400 || $err_code == 0) {
                      $in_res = $this->submit_to_indexnow(array($url));
                      $method = 'IndexNow';
@@ -578,8 +631,25 @@ class SGBing_Pro {
     private function submit_to_indexnow($urls) {
         $key = get_option('sgbing_indexnow_key');
         if(!$key) return array('success'=>false, 'msg'=>'无 IndexNow Key');
-        $data = array('host' => parse_url(home_url(), PHP_URL_HOST), 'key' => $key, 'keyLocation' => home_url('/'.$key.'.txt'), 'urlList' => array_values($urls));
-        $res = wp_remote_post($this->indexnow_endpoint, array('body' => wp_json_encode($data), 'headers' => array('Content-Type' => 'application/json; charset=utf-8'), 'sslverify' => false, 'timeout' => 45, 'user-agent' => 'WordPress/ShiguangPlugin'));
+        
+        // 验证文件地址
+        $key_location = home_url('/'.$key.'.txt');
+        
+        $data = array(
+            'host' => parse_url(home_url(), PHP_URL_HOST),
+            'key' => $key,
+            'keyLocation' => $key_location,
+            'urlList' => array_values($urls)
+        );
+        
+        $res = wp_remote_post($this->indexnow_endpoint, array(
+            'body' => wp_json_encode($data), 
+            'headers' => array('Content-Type' => 'application/json; charset=utf-8'), 
+            'sslverify' => false, 
+            'timeout' => 45, 
+            'user-agent' => 'WordPress/ShiguangPlugin'
+        ));
+        
         if(is_wp_error($res)) return array('success'=>false, 'msg'=>$res->get_error_message());
         $code = wp_remote_retrieve_response_code($res);
         if($code === 200 || $code === 202) return array('success'=>true, 'msg'=>'OK');
@@ -587,9 +657,9 @@ class SGBing_Pro {
     }
 
     private function translate_error($msg) {
-        if(strpos($msg, '400') !== false) return 'Err 400: 参数错误/Quota满';
-        if(strpos($msg, '401') !== false) return 'Err 401: API Key 无效';
-        if(strpos($msg, '402') !== false) return 'Err 402: 今日配额已用完';
+        if(strpos($msg, '400') !== false) return 'Err 400: 参数/Quota问题';
+        if(strpos($msg, '401') !== false) return 'Err 401: Key 无效';
+        if(strpos($msg, '402') !== false) return 'Err 402: Quota 用完';
         if(strpos($msg, '429') !== false) return 'Err 429: 请求太快';
         if(strpos($msg, '28') !== false) return '连接超时';
         return $msg; 
@@ -625,6 +695,7 @@ class SGBing_Pro {
         check_ajax_referer('sgbing_nonce', 'nonce');
         if(!current_user_can('manage_options')) wp_send_json_error();
         update_option('sgbing_sm_enable', $_POST['enable']==='true'?1:0);
+        // 保存后刷新 rewrite 规则以应用 Sitemap 拦截
         flush_rewrite_rules(); 
         wp_send_json_success();
     }
@@ -646,6 +717,8 @@ class SGBing_Pro {
         }
     }
 
+    // --- 5. Sitemap 逻辑 ---
+
     public function sitemap_init() {
         add_rewrite_rule( 'sitemap\.xml$', 'index.php?sg_sitemap=index', 'top' );
         add_rewrite_rule( 'sitemap-posts\.xml$', 'index.php?sg_sitemap=posts', 'top' );
@@ -654,15 +727,21 @@ class SGBing_Pro {
         add_rewrite_rule( 'sitemap-tags\.xml$', 'index.php?sg_sitemap=tags', 'top' );
     }
     
-    public function register_query_vars( $vars ) { $vars[] = 'sg_sitemap'; $vars[] = 'sg_indexnow_key'; return $vars; }
+    public function register_query_vars( $vars ) { $vars[] = 'sg_sitemap'; return $vars; }
     
     public function sitemap_render() {
         $type = get_query_var( 'sg_sitemap' ); 
         if ( ! $type ) return;
         
-        status_header( 200 ); // 强制 200 状态码
-        header( 'Content-Type: application/xml; charset=utf-8' );
+        // 确保不被缓存插件缓存 XML
+        if ( ! headers_sent() ) {
+            status_header( 200 );
+            header( 'Content-Type: application/xml; charset=utf-8' );
+            header( 'X-Robots-Tag: noindex, follow' );
+        }
+        
         echo '<?xml version="1.0" encoding="UTF-8"?>';
+        echo '<?xml-stylesheet type="text/xsl" href="'.includes_url('css/dist/block-library/sitemap.xsl').'"?>'; // 尝试使用 WP 默认样式（如果有）
         
         if ($type === 'index') {
             echo '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
@@ -675,13 +754,33 @@ class SGBing_Pro {
         }
         
         echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
+        
+        // 优化查询：只获取 ID 和 修改时间，减少内存消耗
         if($type==='posts'){
-            $posts=get_posts(array('numberposts'=>5000,'post_status'=>'publish'));
-            foreach($posts as $p) echo '<url><loc>'.esc_url(get_permalink($p->ID)).'</loc><lastmod>'.get_the_modified_date('Y-m-d',$p->ID).'</lastmod></url>';
+            $posts = get_posts(array(
+                'numberposts' => 2000, 
+                'post_status' => 'publish',
+                'orderby'     => 'modified',
+                'order'       => 'DESC'
+            ));
+            foreach($posts as $p) {
+                echo '<url>';
+                echo '<loc>'.esc_url(get_permalink($p->ID)).'</loc>';
+                echo '<lastmod>'.get_the_modified_date('Y-m-d', $p->ID).'</lastmod>';
+                echo '</url>';
+            }
         }
         elseif($type==='pages'){
-            $pages=get_pages(array('number'=>1000,'post_status'=>'publish'));
-            foreach($pages as $p) echo '<url><loc>'.esc_url(get_permalink($p->ID)).'</loc><lastmod>'.get_the_modified_date('Y-m-d',$p->ID).'</lastmod></url>';
+            $pages = get_pages(array(
+                'number' => 500, 
+                'post_status' => 'publish'
+            ));
+            foreach($pages as $p) {
+                echo '<url>';
+                echo '<loc>'.esc_url(get_permalink($p->ID)).'</loc>';
+                echo '<lastmod>'.get_the_modified_date('Y-m-d', $p->ID).'</lastmod>';
+                echo '</url>';
+            }
         }
         elseif($type==='cats'){
             $terms = get_terms(array('taxonomy' => 'category', 'hide_empty' => true));
@@ -690,7 +789,7 @@ class SGBing_Pro {
             }
         }
         elseif($type==='tags'){
-            $tags = get_terms(array('taxonomy' => 'post_tag', 'hide_empty' => true));
+            $tags = get_terms(array('taxonomy' => 'post_tag', 'hide_empty' => true, 'number' => 1000));
             if(!empty($tags) && !is_wp_error($tags)) {
                 foreach($tags as $t) echo '<url><loc>'.esc_url(get_tag_link($t->term_id)).'</loc></url>';
             }
