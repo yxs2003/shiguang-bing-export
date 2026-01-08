@@ -47,6 +47,30 @@
 [![密钥管理](https://s41.ax1x.com/2025/12/02/pZZ3kUs.webp)](https://imgchr.com/i/pZZ3kUs)
 
 ## 更新日志
+### v6.1 (2026-01-08)
+1. IndexNow 物理文件生成（核心修复）：
+
+- 机制改变：不再依赖 WordPress 的伪静态（Rewrite API），因为 Nginx/Apache 通常会优先处理静态文件，导致伪静态不生效。现在改为在根目录生成真实的 .txt 文件。
+
+- 自动维护：生成新 Key 时自动删除旧文件；插件激活时自动检查并创建文件。
+
+2. 增加卸载清理机制 (uninstall)：
+
+- 新增了 register_uninstall_hook。当你删除插件时，它会自动删除数据库中的日志表 (sgbing_logs) 以及根目录的 IndexNow 验证文件，保持网站整洁。
+
+3. 安全性增强：
+
+- 在处理 AJAX 提交的 URL 时，增加了 esc_url_raw 进行过滤，防止潜在的 XSS 或注入风险。
+
+4. Sitemap 性能微调：
+
+- 优化了 Sitemap 的查询参数，确保只获取必要的数据，减少内存占用。
+
+5. 代码结构优化：
+
+- 将文件写入逻辑封装为私有方法 update_indexnow_file，便于多处复用。
+
+
 ### v5.9 (2025-11-29)
 - 新增 `stop_canonical_redirect` 函数，彻底解决 sitemap.xml 后缀自动添加斜杠问题
 - 输出 XML 前强制发送 HTTP 200 状态码，避免服务器返回 404 头信息导致爬虫误判
