@@ -2,8 +2,8 @@
 /*
 Plugin Name: Shiguang Bing URL Export
 Plugin URI: https://www.shiguang.ink/
-Description: 企业级 Bing 站长助手 v6.1。修复 IndexNow 验证问题，增加卸载清理，优化安全性，恢复Sitemap详细索引。
-Version: 6.1
+Description: 企业级 Bing 站长助手 v6.2。修复 Sitemap 白屏问题，极致优化查询性能，修复 IndexNow 验证与 JS 语法错误。
+Version: 6.2
 Author: Shiguang
 License: GPLv2
 */
@@ -18,7 +18,7 @@ class SGBing_Pro {
     private $quota_endpoint = 'https://ssl.bing.com/webmaster/api.svc/json/GetUrlSubmissionQuota';
     private $indexnow_endpoint = 'https://api.indexnow.org/indexnow';
     private $log_table;
-    private $db_version = '1.6'; // 版本号升级
+    private $db_version = '1.7'; // 版本号升级以触发更新检查
 
     public function __construct() {
         global $wpdb;
@@ -40,7 +40,7 @@ class SGBing_Pro {
 
         // Sitemap 相关
         add_action( 'init', array( $this, 'sitemap_init' ) );
-        add_action( 'template_redirect', array( $this, 'sitemap_render' ) );
+        add_action( 'template_redirect', array( $this, 'sitemap_render' ), 1 ); // 提高优先级
         add_filter( 'query_vars', array( $this, 'register_query_vars' ) );
         add_filter( 'redirect_canonical', array( $this, 'stop_canonical_redirect' ), 10, 2 );
 
@@ -70,15 +70,16 @@ class SGBing_Pro {
         delete_option( 'sgbing_db_version' );
         delete_option( 'sgbing_api_key' );
         delete_option( 'sgbing_sm_enable' );
+        delete_option( 'sgbing_indexnow_key' );
 
-        // 3. 删除 IndexNow 文件
-        $key = get_option( 'sgbing_indexnow_key' );
-        if ( $key ) {
-            $file = ABSPATH . $key . '.txt';
-            if ( file_exists( $file ) ) {
-                @unlink( $file );
+        // 3. 删除 IndexNow 文件 (尝试查找并删除)
+        $files = glob( ABSPATH . '*.txt' );
+        if ( $files ) {
+            foreach ( $files as $file ) {
+                if ( preg_match( '/[a-f0-9]{32}\.txt$/', $file ) ) {
+                    @unlink( $file );
+                }
             }
-            delete_option( 'sgbing_indexnow_key' );
         }
     }
 
@@ -145,8 +146,8 @@ class SGBing_Pro {
 
     public function load_assets( $hook ) {
         if ( strpos( $hook, 'sgbing-export' ) === false ) return;
-        wp_enqueue_style( 'sgbing-css', plugin_dir_url( __FILE__ ) . 'admin.css', array(), '6.1' );
-        wp_enqueue_script( 'sgbing-js', plugin_dir_url( __FILE__ ) . 'admin.js', array( 'jquery' ), '6.1', true );
+        wp_enqueue_style( 'sgbing-css', plugin_dir_url( __FILE__ ) . 'admin.css', array(), '6.2' );
+        wp_enqueue_script( 'sgbing-js', plugin_dir_url( __FILE__ ) . 'admin.js', array( 'jquery' ), '6.2', true );
         wp_localize_script( 'sgbing-js', 'sgbingVars', array(
             'ajaxUrl' => admin_url( 'admin-ajax.php' ),
             'nonce'   => wp_create_nonce( 'sgbing_nonce' )
@@ -181,12 +182,12 @@ class SGBing_Pro {
         }
     }
 
-    // --- 3. UI 渲染 ---
-
+    // --- 3. UI 渲染 (保持不变) ---
     public function render_ui() {
         $api_key = get_option( 'sgbing_api_key' );
         $has_key = ! empty( $api_key );
         $indexnow_key = get_option( 'sgbing_indexnow_key' );
+        // 优化查询，只获取 ID
         $post_ids = get_posts( array('numberposts' => -1, 'post_status' => 'publish', 'fields' => 'ids') );
         $chunks = array_chunk( $post_ids, 50 );
         $sm_enable = get_option( 'sgbing_sm_enable', 1 );
@@ -224,7 +225,7 @@ class SGBing_Pro {
                     <span class="dashicons dashicons-menu-alt"></span> 菜单
                 </div>
                 <div class="sg-sidebar" id="sg-sidebar">
-                    <div class="sg-brand">Bing Pro <span class="ver">v6.1</span></div>
+                    <div class="sg-brand">Bing Pro <span class="ver">v6.2</span></div>
                     <nav class="sg-nav">
                         <a href="#dashboard" class="nav-item active" data-tab="dashboard"><span class="dashicons dashicons-dashboard"></span> 概览 & 日志</a>
                         <a href="#bulk" class="nav-item" data-tab="bulk"><span class="dashicons dashicons-upload"></span> 链接提交</a>
@@ -259,7 +260,7 @@ class SGBing_Pro {
                                         </div>
                                         <div class="chart-info">
                                             <span class="label">API 今日剩余</span>
-                                            <div class="sub-label">每日上限: <span id="quota-limit-text">100</span></div>
+                                            <div class="sub-label">每日上限: <span id="quota-limit-text">--</span></div>
                                         </div>
                                     </div>
                                 </div>
@@ -427,7 +428,7 @@ class SGBing_Pro {
                             <div class="sg-card">
                                 <h4 style="margin-top:0;">关于插件</h4>
                                 <p style="font-size:13px; color:#666; line-height:1.6;">
-                                    <strong>Bing Webmaster Pro</strong> v6.1<br>
+                                    <strong>Bing Webmaster Pro</strong> v6.2<br>
                                     开发者: Shiguang
                                 </p>
                             </div>
@@ -458,7 +459,7 @@ class SGBing_Pro {
         $offset = ($page - 1) * $per_page;
 
         $total_items = $wpdb->get_var("SELECT COUNT(*) FROM $this->log_table");
-        $total_pages = ceil($total_items / $per_page);
+        $total_pages = $total_items > 0 ? ceil($total_items / $per_page) : 1;
 
         $logs = $wpdb->get_results( $wpdb->prepare("SELECT * FROM $this->log_table ORDER BY time DESC LIMIT %d OFFSET %d", $per_page, $offset) );
         
@@ -507,6 +508,7 @@ class SGBing_Pro {
         
         if ( isset( $body['d'] ) ) {
             $daily = $body['d']['DailyQuota'];
+            // 简单估算上限
             $limit = ($daily > 100) ? 10000 : 100;
             return array('success'=>true, 'daily'=>$daily, 'limit'=>$limit);
         }
@@ -717,8 +719,6 @@ class SGBing_Pro {
         }
     }
 
-    // --- 5. Sitemap 逻辑 ---
-
     public function sitemap_init() {
         add_rewrite_rule( 'sitemap\.xml$', 'index.php?sg_sitemap=index', 'top' );
         add_rewrite_rule( 'sitemap-posts\.xml$', 'index.php?sg_sitemap=posts', 'top' );
@@ -733,7 +733,12 @@ class SGBing_Pro {
         $type = get_query_var( 'sg_sitemap' ); 
         if ( ! $type ) return;
         
-        // 确保不被缓存插件缓存 XML
+        // 强力清空缓冲区，防止空行干扰
+        if ( ob_get_length() ) ob_end_clean();
+        
+        // 防止数据量大导致 PHP 超时
+        if ( function_exists( 'set_time_limit' ) ) set_time_limit( 0 );
+        
         if ( ! headers_sent() ) {
             status_header( 200 );
             header( 'Content-Type: application/xml; charset=utf-8' );
@@ -741,7 +746,6 @@ class SGBing_Pro {
         }
         
         echo '<?xml version="1.0" encoding="UTF-8"?>';
-        echo '<?xml-stylesheet type="text/xsl" href="'.includes_url('css/dist/block-library/sitemap.xsl').'"?>'; // 尝试使用 WP 默认样式（如果有）
         
         if ($type === 'index') {
             echo '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
@@ -755,30 +759,48 @@ class SGBing_Pro {
         
         echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
         
-        // 优化查询：只获取 ID 和 修改时间，减少内存消耗
+        // 2. 核心修复：极致性能优化，避免加载文章内容导致内存溢出 (White Screen of Death)
         if($type==='posts'){
             $posts = get_posts(array(
-                'numberposts' => 2000, 
+                'numberposts' => 4000, // 略微增加数量
                 'post_status' => 'publish',
                 'orderby'     => 'modified',
-                'order'       => 'DESC'
+                'order'       => 'DESC',
+                'fields'      => 'ids', // 只获取 ID，极大降低内存消耗
+                'no_found_rows' => true, // 不计算总行数，加快查询
+                'update_post_meta_cache' => false, // 不加载元数据
+                'update_post_term_cache' => false, // 不加载分类缓存
             ));
-            foreach($posts as $p) {
+            
+            foreach($posts as $post_id) { // 注意：这里拿到的是 ID
+            $p_url = get_permalink($post_id);
+                if(!$p_url) continue; // 防止空链接
+                
+                
                 echo '<url>';
-                echo '<loc>'.esc_url(get_permalink($p->ID)).'</loc>';
-                echo '<lastmod>'.get_the_modified_date('Y-m-d', $p->ID).'</lastmod>';
+                echo '<loc>'.esc_url(get_permalink($post_id)).'</loc>';
+                echo '<lastmod>'.get_the_modified_date('Y-m-d', $post_id).'</lastmod>';
                 echo '</url>';
             }
         }
         elseif($type==='pages'){
-            $pages = get_pages(array(
-                'number' => 500, 
-                'post_status' => 'publish'
+            // 将 get_pages 改为 get_posts 以获得性能参数支持
+            $pages = get_posts(array(
+                'numberposts' => 1000, 
+                'post_type'   => 'page',
+                'post_status' => 'publish',
+                'orderby'     => 'modified',
+                'order'       => 'DESC',
+                'fields'      => 'ids', // 同样的优化
+                'no_found_rows' => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
             ));
-            foreach($pages as $p) {
+            
+            foreach($pages as $post_id) {
                 echo '<url>';
-                echo '<loc>'.esc_url(get_permalink($p->ID)).'</loc>';
-                echo '<lastmod>'.get_the_modified_date('Y-m-d', $p->ID).'</lastmod>';
+                echo '<loc>'.esc_url(get_permalink($post_id)).'</loc>';
+                echo '<lastmod>'.get_the_modified_date('Y-m-d', $post_id).'</lastmod>';
                 echo '</url>';
             }
         }
