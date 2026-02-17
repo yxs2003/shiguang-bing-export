@@ -1,6 +1,7 @@
 var currentPage = 1; // 全局变量记录当前页
 
 jQuery(document).ready(function($) {
+    if (typeof sgbingVars === 'undefined') return;
 
     // Toast
     window.showToast = function(msg, type = 'success') {
@@ -128,7 +129,7 @@ jQuery(document).ready(function($) {
         const btn = urlOverride ? null : $('#tab-bulk .sg-btn.primary.full');
         let orgText = '';
         if(btn) { orgText = btn.text(); btn.text('处理中...').prop('disabled', true); }
-        else { showToast('正在后台重试...', 'loading'); }
+        else if(!urlOverride) { showToast('正在后台重试...', 'loading'); }
 
         $.post(sgbingVars.ajaxUrl, {
             action: 'sgbing_manual_submit',
@@ -178,7 +179,8 @@ jQuery(document).ready(function($) {
         });
     };
 
-    $(document).on('click',('.btn-copy-link'), function() {
+    // 修复点：移除了多余的括号
+    $(document).on('click', '.btn-copy-link', function() {
         const url = $(this).data('url');
         copyToClipboard(url).then(() => showToast('已复制链接', 'success'));
     });
