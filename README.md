@@ -47,6 +47,15 @@
 [![密钥管理](https://s41.ax1x.com/2025/12/02/pZZ3kUs.webp)](https://imgchr.com/i/pZZ3kUs)
 
 ## 更新日志
+
+### v6.2 (2026-02-17)
+
+- 修复 Sitemap 白屏问题
+
+- 优化查询性能
+
+- 修复 IndexNow 验证与 JS 语法错误
+
 ### v6.1 (2026-01-08)
 1. IndexNow 物理文件生成（核心修复）：
 
